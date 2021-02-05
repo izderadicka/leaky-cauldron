@@ -184,10 +184,10 @@ mod tests {
             }
         }
         // wait a bit for leak:
-        sleep(Duration::from_millis(30)).await;
+        sleep(Duration::from_millis(40)).await;
         let res = leaky.start_one();
         if let Ok(n) = res {
-            assert_eq!(n, 50);
+            assert!(n>48 && n <= 50, "should release one or two slots");
         } else {
             panic!("Slot was not released by leaky")
         }
@@ -213,7 +213,7 @@ mod tests {
         }
         //should be full now
         assert!(leaky.start_one().is_err());
-        sleep(Duration::from_millis(30)).await;
+        sleep(Duration::from_millis(50)).await;
         assert_eq!(leaky.immediate_capacity(), 10);
         sleep(Duration::from_millis(200)).await;
 
@@ -224,7 +224,7 @@ mod tests {
         }
         //should be full now
         assert!(leaky.start_one().is_err());
-        sleep(Duration::from_millis(30)).await;
+        sleep(Duration::from_millis(50)).await;
         assert_eq!(leaky.immediate_capacity(), 10);
 
     }
