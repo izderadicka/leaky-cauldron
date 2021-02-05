@@ -7,11 +7,8 @@ use std::{
 };
 
 use futures::future::{select, Either};
-use log::{debug, error, trace};
-use tokio::{
-    sync::mpsc::{unbounded_channel, UnboundedSender},
-    time::sleep,
-};
+use log::{debug, error, trace, warn};
+use tokio::{sync::mpsc::{unbounded_channel, UnboundedSender}, time::{Instant, Sleep, sleep_until}};
 
 #[derive(Debug, Clone, Copy)]
 enum Cmd {
@@ -25,41 +22,64 @@ pub struct Leaky {
     sender: UnboundedSender<Cmd>,
 }
 
-const LONG_DURATION: Duration = Duration::from_secs(1_000_000*365*24*3600);
+const LONG_DURATION: Duration = Duration::from_secs(3*365*24*3600);
+
+#[inline]
+fn sleep(period: Duration) -> Option<(Instant, Sleep)> {
+    let t =  Instant::now();
+    Some((t, sleep_until(t+period)))
+
+}
 
 impl Leaky {
     pub fn new(capacity: usize, rate: f32) -> Self {
-        const MEGA: f32 = 1_000_000.0;
-        assert!(rate <= MEGA);
+        const KILO: f32 = 1_000.0;
+        assert!(rate <= KILO, "Is not much usable beyond ms");
         assert!(capacity > 0);
-        let interval_us: u64 = (MEGA / rate) as u64;
+        let interval_ms: u64 = (KILO / rate) as u64;
         let counter = Arc::new(AtomicUsize::new(0));
         let (sender, mut recipient) = unbounded_channel();
         let counter2 = counter.clone();
         let _t = tokio::spawn(async move {
-            let period = Duration::from_micros(interval_us);
+            let period = Duration::from_millis(interval_ms);
             debug!("period {:?}", period);
-            let mut next_time = Some(sleep(period));
+            let mut next_time = sleep(period);
             loop {
-                let tick = Box::pin(next_time.take().unwrap());
+                let (prev_time, next_tick) = next_time.take().unwrap();
+                let tick = Box::pin(next_tick);
                 let recv = Box::pin(recipient.recv());
                 match select(tick, recv).await {
                     Either::Left((_, _r)) => {
+                        let endured =Instant::now().duration_since(prev_time).as_millis();
+                        let mut ratio = (endured as u64 / interval_ms) as usize;
+                        if ratio > 1 {
+                            warn!("has been waiting too long {}x", ratio)
+                        } else if ratio == 0 {
+                            warn!("has been waiting too shoot {}", endured);
+                            // we always want to proceed
+                            ratio =1
+                        }
                         let v = counter2.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
                             if v > 0 {
-                                Some(v - 1)
+                                Some(v.saturating_sub(ratio))
                             } else {
                                 None
                             }
                         });
                         trace!("Tick for old v {:?}", v);
                         match v {
-                            Ok(1) | Err(0) => next_time = Some(sleep(LONG_DURATION)),
-                            _ => next_time = Some(sleep(period)),
+                            Ok(1) | Err(0) => next_time = { 
+                                sleep(LONG_DURATION)
+                            },
+                            _ => next_time = {
+                                sleep(period)
+                            }
                         }
                     }
                     Either::Right((cmd, _)) => match cmd {
-                        Some(Cmd::Continue) => next_time = Some(sleep(period)),
+                        Some(Cmd::Continue) => next_time = {
+                            sleep(period)
+                        },
                         Some(Cmd::Terminate) | None => break,
                     },
                 };
@@ -163,7 +183,7 @@ mod tests {
                 panic!("Leaky should be full")
             }
         }
-        // wait a bit for leek:
+        // wait a bit for leak:
         sleep(Duration::from_millis(30)).await;
         let res = leaky.start_one();
         if let Ok(n) = res {
@@ -193,7 +213,7 @@ mod tests {
         }
         //should be full now
         assert!(leaky.start_one().is_err());
-        sleep(Duration::from_millis(50)).await;
+        sleep(Duration::from_millis(30)).await;
         assert_eq!(leaky.immediate_capacity(), 10);
         sleep(Duration::from_millis(200)).await;
 
@@ -204,7 +224,7 @@ mod tests {
         }
         //should be full now
         assert!(leaky.start_one().is_err());
-        sleep(Duration::from_millis(50)).await;
+        sleep(Duration::from_millis(30)).await;
         assert_eq!(leaky.immediate_capacity(), 10);
 
     }
