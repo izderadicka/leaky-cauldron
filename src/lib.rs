@@ -9,14 +9,9 @@ use std::{
     time::Duration,
 };
 
-use futures::{
-    future::poll_fn
-};
+use futures::{future::poll_fn, ready};
 use log::{error, trace, warn};
-use tokio::{
-    sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-    time::{Instant, Sleep},
-};
+use tokio::{sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender}, time::{Instant, Sleep, sleep}};
 
 #[derive(Debug, Clone, Copy)]
 enum Cmd {
@@ -34,7 +29,7 @@ struct Ticker {
 impl Ticker {
     fn new(period: Duration, cmd_channel: UnboundedReceiver<Cmd>) -> Self {
         Ticker {
-            timer: Some(Box::pin(tokio::time::sleep(period))),
+            timer: Some(Box::pin(sleep(period))),
             cmd: Box::pin(cmd_channel),
             period,
         }
@@ -46,7 +41,7 @@ impl Ticker {
                 Cmd::Pause => {
                     self.timer.take();
                 }
-                Cmd::Continue => self.timer = Some(Box::pin(tokio::time::sleep(self.period))),
+                Cmd::Continue => self.timer = Some(Box::pin(sleep(self.period))),
             },
             Poll::Ready(None) => {
                 warn!("Channel should not be closed, rather use terminate message");
@@ -54,16 +49,12 @@ impl Ticker {
             }
             Poll::Pending => {}
         }
-        match self.timer.take() {
-            Some(mut timer) => {
-                if let Poll::Pending = Pin::new(&mut timer).poll(ctx) {
-                    self.timer = Some(timer);
-                    return Poll::Pending;
-                }
+        match self.timer.as_mut() {
+            Some(timer) => {
+                ready!(timer.as_mut().poll(ctx));
                 let t = timer.deadline();
                 let next_tick = t + *&self.period;
                 timer.as_mut().reset(next_tick);
-                self.timer = Some(timer);
                 Poll::Ready(Some(t))
             }
             None => Poll::Pending,
@@ -175,7 +166,7 @@ mod tests {
     use crate::{Cmd, Leaky, Ticker};
 
     type Error = Box<dyn std::error::Error + Send + 'static>;
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_interval() -> Result<(), Error> {
         env_logger::try_init().ok();
         let counter = Arc::new(AtomicUsize::new(0));
@@ -195,7 +186,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_leaky_basic() {
         env_logger::try_init().ok();
         let leaky = Leaky::new(50, 50.0);
@@ -235,10 +226,10 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_leaky_pausing() {
         env_logger::try_init().ok();
-        let leaky = Leaky::new(10, 500.0);
+        let leaky = Leaky::new(10, 50.0);
 
         macro_rules! tst {
             () => {
@@ -248,7 +239,7 @@ mod tests {
                 }
                 //should be full now
                 assert!(leaky.start_one().is_err());
-                sleep(Duration::from_millis(70)).await;
+                sleep(Duration::from_millis(300)).await;
                 assert_eq!(leaky.immediate_capacity(), 10);
 
             }
@@ -256,13 +247,13 @@ mod tests {
         
         tst!();
 
-        sleep(Duration::from_millis(200)).await;
+        sleep(Duration::from_millis(400)).await;
         // again
 
         tst!();
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_ticker() {
         env_logger::try_init().ok();
         let (sender, receiver) = unbounded_channel();
