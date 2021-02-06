@@ -76,20 +76,26 @@ pub struct Leaky {
 }
 
 impl Leaky {
-    // pub fn new(rate: f32) -> Self {
-    //     const KILO: f32 = 1_000.0;
-    //     assert!(rate <= KILO, "Is not much usable beyond ms");
-    //     let period = (KILO/rate).floor() as usize;
-
-    //     let (period, units) = if period < 100 {
-    //         let units = 100.0 / period as f32
-    //     }
-
-    //     unimplemented!()
-    // }
-
     /// Creates new Leaky (leaky bucket algorithm implementation for tokio)
     /// https://en.wikipedia.org/wiki/Leaky_bucket
+    ///
+    /// Parameter `rate` is used to calculate all other parameters.
+    /// Capacity is 110 % of rate, period is 1/rate, but only if period is bigger then 100ms,
+    /// otherwise period is extended over 100ms and appropriately numbers of units leaked during
+    /// period is increased
+    pub fn new(rate: f32) -> Self {
+        const KILO: f32 = 1_000.0;
+        assert!(rate <= KILO, "Is not much usable beyond ms");
+
+        let mut period = (KILO / rate).floor() as usize;
+        let units = (100.0 / period as f32).ceil() as usize;
+        period *= units;
+        let capacity = (rate * 1.1).ceil() as usize;
+
+        Leaky::new_with_params(capacity, period, units)
+    }
+
+    /// Creates new Leaky with detailed parameters
     ///
     /// Parameters:
     /// capacity -  capacity of the bucket
@@ -132,6 +138,9 @@ impl Leaky {
         }
     }
 
+    /// Indicates that new unit has arrived and returns Result, if this one is still with rate/capacity
+
+    /// Return results - Ok(x) if still within capacity (x is capacity now taken), Err otherwise.
     pub fn start_one(&self) -> Result<usize, usize> {
         let mut v = self.counter.load(Ordering::SeqCst);
         if v >= self.capacity {
@@ -155,6 +164,7 @@ impl Leaky {
         }
     }
 
+    /// Returns remaning capacity at this monent - e.g. now many units can pass right now
     pub fn immediate_capacity(&self) -> usize {
         self.capacity - self.counter.load(Ordering::Relaxed)
     }
