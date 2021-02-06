@@ -76,22 +76,41 @@ pub struct Leaky {
 }
 
 impl Leaky {
-    pub fn new(capacity: usize, rate: f32) -> Self {
-        const KILO: f32 = 1_000.0;
-        assert!(rate <= KILO, "Is not much usable beyond ms");
+    // pub fn new(rate: f32) -> Self {
+    //     const KILO: f32 = 1_000.0;
+    //     assert!(rate <= KILO, "Is not much usable beyond ms");
+    //     let period = (KILO/rate).floor() as usize;
+
+    //     let (period, units) = if period < 100 {
+    //         let units = 100.0 / period as f32
+    //     }
+
+    //     unimplemented!()
+    // }
+
+    /// Creates new Leaky (leaky bucket algorithm implementation for tokio)
+    /// https://en.wikipedia.org/wiki/Leaky_bucket
+    ///
+    /// Parameters:
+    /// capacity -  capacity of the bucket
+    /// period -    sampling period in ms
+    /// unis -      how much units leaks every period
+    pub fn new_with_params(capacity: usize, period: usize, units: usize) -> Self {
         assert!(capacity > 0);
-        let interval_ms: u64 = (KILO / rate) as u64;
+        assert!(units > 0);
+        assert!(period > 0);
+        assert!(units <= capacity);
         let counter = Arc::new(AtomicUsize::new(0));
         let (sender, recipient) = unbounded_channel();
         let counter2 = counter.clone();
         let sender2 = sender.clone();
         let _t = tokio::spawn(async move {
-            let period = Duration::from_millis(interval_ms);
+            let period = Duration::from_millis(period as u64);
             let mut ticker = Ticker::new(period, recipient);
             while let Some(_t) = ticker.tick().await {
                 let v = counter2.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
                     if v > 0 {
-                        Some(v.saturating_sub(1))
+                        Some(v.saturating_sub(units))
                     } else {
                         None
                     }
@@ -151,47 +170,17 @@ impl Drop for Leaky {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc,
-        },
-        time::{Duration, Instant},
-    };
+    use std::time::{Duration, Instant};
 
     use log::{debug, trace};
-    use tokio::{
-        sync::mpsc::unbounded_channel,
-        time::{interval, sleep},
-    };
+    use tokio::{sync::mpsc::unbounded_channel, time::sleep};
 
     use crate::{Cmd, Leaky, Ticker};
-
-    type Error = Box<dyn std::error::Error + Send + 'static>;
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn test_interval() -> Result<(), Error> {
-        env_logger::try_init().ok();
-        let counter = Arc::new(AtomicUsize::new(0));
-        let c = counter.clone();
-        let t = tokio::spawn(async move {
-            let mut i = interval(Duration::from_millis(10));
-            let start = Instant::now();
-            for _i in 0..100 {
-                let prev = c.fetch_add(1, Ordering::Relaxed);
-                let enlapsed = Instant::now().duration_since(start).as_millis();
-                trace!("tick {} - time {}", prev, enlapsed);
-                i.tick().await;
-            }
-        });
-        t.await.unwrap();
-        assert_eq!(100, counter.load(Ordering::Relaxed));
-        Ok(())
-    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_leaky_basic() {
         env_logger::try_init().ok();
-        let leaky = Leaky::new(50, 50.0);
+        let leaky = Leaky::new_with_params(50, 20, 1);
         for i in 1..=50 {
             let res = leaky.start_one();
             assert!(res.is_ok());
@@ -231,7 +220,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_leaky_pausing() {
         env_logger::try_init().ok();
-        let leaky = Leaky::new(10, 50.0);
+        let leaky = Leaky::new_with_params(10, 20, 2);
 
         macro_rules! tst {
             () => {
@@ -240,14 +229,14 @@ mod tests {
                 }
                 //should be full now
                 assert!(leaky.start_one().is_err());
-                sleep(Duration::from_millis(300)).await;
+                sleep(Duration::from_millis(150)).await;
                 assert_eq!(leaky.immediate_capacity(), 10);
             };
         }
 
         tst!();
 
-        sleep(Duration::from_millis(400)).await;
+        sleep(Duration::from_millis(200)).await;
         // again
 
         tst!();
