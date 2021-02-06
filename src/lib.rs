@@ -11,7 +11,10 @@ use std::{
 
 use futures::{future::poll_fn, ready};
 use log::{error, trace, warn};
-use tokio::{sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender}, time::{Instant, Sleep, sleep}};
+use tokio::{
+    sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+    time::{sleep, Instant, Sleep},
+};
 
 #[derive(Debug, Clone, Copy)]
 enum Cmd {
@@ -53,7 +56,7 @@ impl Ticker {
             Some(timer) => {
                 ready!(timer.as_mut().poll(ctx));
                 let t = timer.deadline();
-                let next_tick = t + *&self.period;
+                let next_tick = t + self.period;
                 timer.as_mut().reset(next_tick);
                 Poll::Ready(Some(t))
             }
@@ -86,7 +89,6 @@ impl Leaky {
             let period = Duration::from_millis(interval_ms);
             let mut ticker = Ticker::new(period, recipient);
             while let Some(_t) = ticker.tick().await {
-
                 let v = counter2.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
                     if v > 0 {
                         Some(v.saturating_sub(1))
@@ -141,7 +143,7 @@ impl Leaky {
 
 impl Drop for Leaky {
     fn drop(&mut self) {
-        if let Err(_) = self.sender.send(Cmd::Terminate) {
+        if self.sender.send(Cmd::Terminate).is_err() {
             error!("Cannot send terminate to leaky background task")
         }
     }
@@ -233,7 +235,6 @@ mod tests {
 
         macro_rules! tst {
             () => {
-
                 for _i in 1..=10 {
                     assert!(leaky.start_one().is_ok());
                 }
@@ -241,10 +242,9 @@ mod tests {
                 assert!(leaky.start_one().is_err());
                 sleep(Duration::from_millis(300)).await;
                 assert_eq!(leaky.immediate_capacity(), 10);
-
-            }
+            };
         }
-        
+
         tst!();
 
         sleep(Duration::from_millis(400)).await;
